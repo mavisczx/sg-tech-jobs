@@ -1,40 +1,19 @@
 import { NextResponse } from "next/server";
 
-const GREENHOUSE_COMPANIES = [
-  "stripe",
-  "grab",
-  "cloudflare",
-  "figma",
-  "databricks",
-  "coinbase",
-];
-const LEVER_COMPANIES = ["canva", "nium", "shopback"];
+const GREENHOUSE_COMPANIES = ["stripe", "grab", "cloudflare", "figma", "databricks", "coinbase", "airbnb"];
+const LEVER_COMPANIES = ["canva", "nium", "shopback", "spotify"];
+const ASHBY_COMPANIES = ["linear", "notion", "revenuecat", "ramp", "retool", "supabase"];
 
+// Highly calibrated for Information Systems & Product/Engineering PM profiles
 const TARGET_ROLES = [
-  "product",
-  "project",
-  "sales",
-  "business development",
-  "consulting",
-  "solutions",
-  "analyst",
-  "associate",
-  "operations",
-];
-const EXCLUDE_SENIORITY = [
-  "senior",
-  "sr.",
-  "principal",
-  "director",
-  "head of",
-  "vp",
-  "lead",
-  "staff",
+  "product manager", "product owner", "project manager", "engineering project manager", 
+  "technology analyst", "systems analyst", "business development", "tech sales", 
+  "solutions", "graduate", "2026"
 ];
 
-// Filter configurations
-const MAX_DAYS_OLD = 7; // Only jobs posted/updated in the last week
-const MAX_ALLOWED_YOE = 5; // Reject if required experience strictly exceeds 5 years
+const EXCLUDE_SENIORITY = ["senior", "sr.", "principal", "director", "head", "vp", "lead", "manager"];
+const MAX_DAYS_OLD = 7; 
+const MAX_ALLOWED_YOE = 3; 
 
 function isWithinDateWindow(dateStr: string, maxDays: number): boolean {
   if (!dateStr) return false;
@@ -43,58 +22,39 @@ function isWithinDateWindow(dateStr: string, maxDays: number): boolean {
   return postedDate >= cutoffDate;
 }
 
-function parseExperienceYears(descriptionText: string): {
-  maxRequired: number;
-  suitable: boolean;
-} {
-  const cleanText = descriptionText.toLowerCase();
+function parseExperienceYears(title: string, descriptionHTML: string): { maxRequired: number; suitable: boolean } {
+  const titleLower = title.toLowerCase();
+  const cleanText = descriptionHTML.replace(/<[^>]*>?/gm, ' ').toLowerCase();
 
-  // If the listing explicitly targets early careers or graduates, approve immediately
-  if (
-    cleanText.includes("fresh grad") ||
-    cleanText.includes("recent graduate") ||
-    cleanText.includes("no prior experience") ||
-    cleanText.includes("entry level") ||
-    cleanText.includes("0-2 years") ||
-    cleanText.includes("0-3 years")
-  ) {
-    return { maxRequired: 2, suitable: true };
+  const isExplicitlyJuniorTitle = /associate|graduate|junior|trainee|apm|analyst|product owner|project manager/i.test(titleLower);
+
+  if (cleanText.includes("fresh grad") || cleanText.includes("recent graduate") || cleanText.includes("0-2 years")) {
+    return { maxRequired: 1, suitable: true };
   }
 
-  // Regex matches: "X-Y years of experience", "X+ years experience", "X to Y yrs exp"
-  const yoeRegex =
-    /(\d+)\s*(?:-|to|\+)?\s*(\d+)?\s*(?:years?|yrs?)(?:\s*of)?\s*(?:relevant|work|professional)?\s*(?:experience|exp)/gi;
-
+  const yoeRegex = /(\d+)\s*(?:-|to|\+)?\s*(\d+)?\s*(?:years?|yrs?)(?:\s*of)?\s*(?:relevant|work|professional)?\s*(?:experience|exp)/gi;
   const matches = [...cleanText.matchAll(yoeRegex)];
+  
   if (matches.length === 0) {
-    // If no years are mentioned, it's typically early-career friendly or open
-    return { maxRequired: 0, suitable: true };
+    return { maxRequired: 0, suitable: isExplicitlyJuniorTitle };
   }
 
   let minYoE = 0;
   for (const match of matches) {
     const lowerBound = parseInt(match[1], 10);
-    // Discard false positives like "company with 10 years experience" or "over 20 years"
-    if (lowerBound > 0 && lowerBound < 15) {
-      minYoE = Math.max(minYoE, lowerBound);
-    }
+    if (lowerBound > 0 && lowerBound < 15) minYoE = Math.max(minYoE, lowerBound);
   }
 
-  return {
-    maxRequired: minYoE,
-    suitable: minYoE <= MAX_ALLOWED_YOE,
-  };
+  return { maxRequired: minYoE, suitable: minYoE <= MAX_ALLOWED_YOE };
 }
+
+// ---------------- ATS FETCHERS ----------------
 
 async function fetchGreenhouseJobs(company: string) {
   try {
-    // ?content=true includes the full HTML description in the response
-    const res = await fetch(
-      `https://boards-api.greenhouse.io/v1/boards/${company}/jobs?content=true`
-    );
+    const res = await fetch(`https://boards-api.greenhouse.io/v1/boards/${company}/jobs?content=true`);
     if (!res.ok) return [];
     const data = await res.json();
-
     return data.jobs.map((job: any) => ({
       id: job.id.toString(),
       title: job.title,
@@ -103,20 +63,16 @@ async function fetchGreenhouseJobs(company: string) {
       location: job.location?.name || "",
       datePosted: job.updated_at || "",
       description: job.content || "",
+      source: `Greenhouse (${company})`
     }));
-  } catch {
-    return [];
-  }
+  } catch { return []; }
 }
 
 async function fetchLeverJobs(company: string) {
   try {
-    const res = await fetch(
-      `https://api.lever.co/v0/postings/${company}?mode=json`
-    );
+    const res = await fetch(`https://api.lever.co/v0/postings/${company}?mode=json`);
     if (!res.ok) return [];
     const data = await res.json();
-
     return data.map((job: any) => ({
       id: job.id,
       title: job.text,
@@ -124,61 +80,104 @@ async function fetchLeverJobs(company: string) {
       link: job.hostedUrl,
       location: job.categories?.location || "",
       datePosted: new Date(job.createdAt).toISOString(),
-      description: job.descriptionPlain || job.description || "",
+      description: job.descriptionPlain || "",
+      source: `Lever (${company})`
     }));
-  } catch {
-    return [];
-  }
+  } catch { return []; }
 }
+
+async function fetchAshbyJobs(company: string) {
+  try {
+    const res = await fetch(`https://api.ashbyhq.com/posting-api/job-board/${company}`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.jobs.map((job: any) => ({
+      id: job.id,
+      title: job.title,
+      company: company.charAt(0).toUpperCase() + company.slice(1),
+      link: job.jobUrl,
+      location: job.location || "",
+      datePosted: job.publishedAt || new Date().toISOString(),
+      description: job.descriptionHtml || "",
+      source: `Ashby (${company})`
+    }));
+  } catch { return []; }
+}
+
+async function fetchMyCareersFuture() {
+  try {
+    // MCF uses structured data, allowing us to filter by seniority IDs (1=Non-Executive, 3=Professional)
+    const res = await fetch("https://api.mycareersfuture.gov.sg/v2/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        searchQuery: "Product OR Analyst OR Data OR Sales",
+        positionLevels: [1, 3], 
+        maxItems: 50
+      })
+    });
+    
+    if (!res.ok) return [];
+    const data = await res.json();
+    
+    return data.results.map((job: any) => ({
+      id: job.uuid || job.job_id,
+      title: job.title,
+      company: job.postedCompany?.name || job.employer_name || "Unknown Company",
+      link: job.jobDetailsUrl || `https://www.mycareersfuture.gov.sg/job/${job.uuid}`,
+      location: "Singapore",
+      datePosted: job.metadata?.updatedAt || job.posted_date || new Date().toISOString(),
+      description: job.description || "",
+      source: "MyCareersFuture",
+      // MCF uniquely provides mandatory salary fields
+      salary: job.salary_min_sgd && job.salary_max_sgd ? `S$${job.salary_min_sgd} - S$${job.salary_max_sgd}` : null,
+      mcfExperience: job.min_experience_years || 0
+    }));
+  } catch { return []; }
+}
+
+// ---------------- MAIN API ROUTE ----------------
 
 export async function GET() {
   try {
-    const [ghResults, leverResults] = await Promise.all([
+    const [gh, lever, ashby, mcf] = await Promise.all([
       Promise.all(GREENHOUSE_COMPANIES.map(fetchGreenhouseJobs)),
       Promise.all(LEVER_COMPANIES.map(fetchLeverJobs)),
+      Promise.all(ASHBY_COMPANIES.map(fetchAshbyJobs)),
+      fetchMyCareersFuture()
     ]);
 
-    const allJobs = [...ghResults.flat(), ...leverResults.flat()];
+    const allJobs = [...gh.flat(), ...lever.flat(), ...ashby.flat(), ...mcf];
     const filteredJobs: any[] = [];
 
     for (const job of allJobs) {
       const titleLower = job.title.toLowerCase();
       const locationLower = job.location.toLowerCase();
 
-      // 1. Must be in Singapore
-      if (!locationLower.includes("singapore") && !locationLower.includes("sg"))
-        continue;
-
-      // 2. Freshness filter (within last MAX_DAYS_OLD days)
+      if (!locationLower.includes("singapore") && !locationLower.includes("sg")) continue;
       if (!isWithinDateWindow(job.datePosted, MAX_DAYS_OLD)) continue;
+      
+      const hasSeniorTitle = EXCLUDE_SENIORITY.some((word) => titleLower.includes(word));
+      const hasJuniorTitle = /associate|graduate|junior|trainee|apm|analyst|product manager|product owner|project manager/.test(titleLower);
+      if (hasSeniorTitle && !hasJuniorTitle) continue;
 
-      // 3. Exclude Senior / Lead / Principal titles
-      if (
-        EXCLUDE_SENIORITY.some((seniorWord) => titleLower.includes(seniorWord))
-      )
-        continue;
-
-      // 4. Must match target role keywords
-      const matchesTargetRole = TARGET_ROLES.some((role) =>
-        titleLower.includes(role)
-      );
+      const matchesTargetRole = TARGET_ROLES.some((role) => titleLower.includes(role));
       if (!matchesTargetRole) continue;
 
-      // 5. Check Years of Experience in Job Description
-      const { suitable, maxRequired } = parseExperienceYears(job.description);
-      if (!suitable) continue;
-
-      // Assign Category
-      let category = "Consulting & Strategy";
-      if (titleLower.includes("product") || titleLower.includes("project")) {
-        category = "Product & Project";
-      } else if (
-        titleLower.includes("sales") ||
-        titleLower.includes("business development") ||
-        titleLower.includes("bdr")
-      ) {
-        category = "Tech Sales";
+      // Handle MCF structured experience differently than ATS HTML parsing
+      let finalYoE = "Early Career / Fresh Grad";
+      if (job.source === "MyCareersFuture") {
+        if (job.mcfExperience > MAX_ALLOWED_YOE) continue; // Hard filter using government data
+        if (job.mcfExperience > 0) finalYoE = `${job.mcfExperience} yrs exp (Verified)`;
+      } else {
+        const { suitable, maxRequired } = parseExperienceYears(job.title, job.description);
+        if (!suitable) continue;
+        if (maxRequired > 0) finalYoE = `${maxRequired} yrs exp`;
       }
+
+      let category = "Consulting & Strategy";
+      if (titleLower.includes("product") || titleLower.includes("project") || titleLower.includes("owner")) category = "Product & Project";
+      else if (titleLower.includes("sales") || titleLower.includes("business development") || titleLower.includes("solutions") || titleLower.includes("bdr")) category = "Tech Sales";
 
       filteredJobs.push({
         id: job.id,
@@ -186,25 +185,17 @@ export async function GET() {
         company: job.company,
         link: job.link,
         category,
+        source: job.source,
+        salary: job.salary,
         datePosted: job.datePosted,
-        experienceRequired:
-          maxRequired > 0
-            ? `${maxRequired} yrs exp`
-            : "Early Career / Fresh Grad",
+        experienceRequired: finalYoE,
       });
     }
 
-    // Sort: Newest postings first
-    filteredJobs.sort(
-      (a, b) =>
-        new Date(b.datePosted).getTime() - new Date(a.datePosted).getTime()
-    );
-
-    return NextResponse.json({ jobs: filteredJobs.slice(0, 15) });
+    filteredJobs.sort((a, b) => new Date(b.datePosted).getTime() - new Date(a.datePosted).getTime());
+    return NextResponse.json({ jobs: filteredJobs.slice(0, 20) });
+    
   } catch (error) {
-    return NextResponse.json(
-      { error: "Failed to scrape filtered jobs" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to scrape filtered jobs" }, { status: 500 });
   }
 }
