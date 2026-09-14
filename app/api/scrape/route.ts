@@ -8,13 +8,13 @@ const LEVER_COMPANIES = ["canva", "nium", "shopback", "spotify"];
 const ASHBY_COMPANIES = ["linear", "notion", "revenuecat", "ramp", "retool", "supabase"];
 
 const TARGET_ROLES = [
-  "product manager", "product owner", "project manager", "engineering project manager", 
-  "technology analyst", "systems analyst", "business development", "tech sales", 
-  "solutions", "graduate", "2026"
+  "product", "project", "analyst", "sales", "business development", 
+  "solutions", "consulting", "consultant", "associate", "graduate", 
+  "bdr", "sdr", "trainee", "early career"
 ];
 
 const EXCLUDE_SENIORITY = ["senior", "sr.", "principal", "director", "head", "vp", "lead", "manager"];
-const MAX_DAYS_OLD = 7; 
+const MAX_DAYS_OLD = 30; 
 const MAX_ALLOWED_YOE = 3; 
 
 function isWithinDateWindow(dateStr: string, maxDays: number): boolean {
@@ -27,12 +27,9 @@ function isWithinDateWindow(dateStr: string, maxDays: number): boolean {
 
 function parseExperienceYears(title: string, descriptionHTML: string): { maxRequired: number; suitable: boolean } {
   const titleLower = (title || "").toLowerCase();
-  
-  // 2. CRUCIAL FIX: Added (descriptionHTML || "") to prevent fatal app crashes if an employer leaves the description blank
   const cleanText = (descriptionHTML || "").replace(/<[^>]*>?/gm, ' ').toLowerCase();
 
-  const isExplicitlyJuniorTitle = /associate|graduate|junior|trainee|apm|analyst|product owner|project manager/i.test(titleLower);
-
+  // If it explicitly asks for a fresh grad, pass it immediately
   if (cleanText.includes("fresh grad") || cleanText.includes("recent graduate") || cleanText.includes("0-2 years")) {
     return { maxRequired: 1, suitable: true };
   }
@@ -41,7 +38,9 @@ function parseExperienceYears(title: string, descriptionHTML: string): { maxRequ
   const matches = [...cleanText.matchAll(yoeRegex)];
   
   if (matches.length === 0) {
-    return { maxRequired: 0, suitable: isExplicitlyJuniorTitle };
+    // CRUCIAL FIX: If the employer doesn't explicitly ask for years of experience, 
+    // DO NOT auto-reject it. Let it through. (We already filter out "Senior" roles elsewhere).
+    return { maxRequired: 0, suitable: true }; 
   }
 
   let minYoE = 0;
@@ -50,6 +49,7 @@ function parseExperienceYears(title: string, descriptionHTML: string): { maxRequ
     if (lowerBound > 0 && lowerBound < 15) minYoE = Math.max(minYoE, lowerBound);
   }
 
+  // Allow jobs asking for 3 years or less
   return { maxRequired: minYoE, suitable: minYoE <= MAX_ALLOWED_YOE };
 }
 
@@ -112,9 +112,12 @@ async function fetchAshbyJobs(company: string) {
 
 async function fetchMyCareersFuture() {
   try {
-    const res = await fetch("https://api.mycareersfuture.gov.sg/v2/jobs", {
+   const res = await fetch("https://api.mycareersfuture.gov.sg/v2/jobs", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { 
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      },
       body: JSON.stringify({
         searchQuery: "Product OR Analyst OR Data OR Sales",
         positionLevels: [1, 3], 
@@ -144,8 +147,8 @@ async function fetchMyCareersFuture() {
 
 export async function GET() {
   try {
-    // 3. CRUCIAL FIX: Wrap the fetches in an 8-second timeout. 
-    // If an API is slow, Vercel will kill the app at 10s. This ensures we return whatever data we gathered in 8s.
+    console.log("Starting scrape..."); // 1. Check if the route is even being hit
+
     const fetchPromises = Promise.all([
       Promise.all(GREENHOUSE_COMPANIES.map(fetchGreenhouseJobs)),
       Promise.all(LEVER_COMPANIES.map(fetchLeverJobs)),
@@ -154,20 +157,26 @@ export async function GET() {
     ]);
 
     const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve([[], [], [], []]), 8000));
-    
-    // Whichever finishes first: the data fetch, or the 8-second safety timer
     const results = await Promise.race([fetchPromises, timeoutPromise]) as any[];
     
     const [gh, lever, ashby, mcf] = results;
     const allJobs = [...(gh || []).flat(), ...(lever || []).flat(), ...(ashby || []).flat(), ...(mcf || [])];
+    
+    // 2. See how much raw data we got before filtering
+    console.log(`Raw jobs fetched: ${allJobs.length}`); 
+
     const filteredJobs: any[] = [];
+    let sgCount = 0;
 
     for (const job of allJobs) {
       if (!job) continue;
       const titleLower = (job.title || "").toLowerCase();
       const locationLower = (job.location || "").toLowerCase();
 
+      // Check location
       if (!locationLower.includes("singapore") && !locationLower.includes("sg")) continue;
+      sgCount++; 
+
       if (!isWithinDateWindow(job.datePosted, MAX_DAYS_OLD)) continue;
       
       const hasSeniorTitle = EXCLUDE_SENIORITY.some((word) => titleLower.includes(word));
@@ -204,7 +213,9 @@ export async function GET() {
       });
     }
 
-    // Safely sort dates
+    // 3. See exactly how many survived the filter
+    console.log(`Jobs in SG: ${sgCount} | Jobs matching final strict filters: ${filteredJobs.length}`);
+
     filteredJobs.sort((a, b) => {
       const timeA = new Date(a.datePosted).getTime() || 0;
       const timeB = new Date(b.datePosted).getTime() || 0;
@@ -214,6 +225,7 @@ export async function GET() {
     return NextResponse.json({ jobs: filteredJobs.slice(0, 20) });
     
   } catch (error) {
+    console.error("Backend Error:", error); // 4. Catch silent crashes
     return NextResponse.json({ error: "Failed to scrape filtered jobs" }, { status: 500 });
   }
 }
